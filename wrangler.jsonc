@@ -1,0 +1,60 @@
+{
+  // Cloudflare Workers configuration for pingo-doce-mcp
+  // Remote MCP server with Browser Rendering for Pingo Doce scraping
+
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "pingo-doce-mcp",
+  "account_id": "5f87487935ef00f3d43fe0439aaa185a",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-09-22",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // ────────────────────────────────────────────────────────────────────
+  // Browser Rendering binding
+  // Requires a Workers Paid plan (included in Workers Paid / Bundled).
+  // Enable: Workers > Settings > Browser Rendering > Add binding "BROWSER"
+  // Docs: https://developers.cloudflare.com/browser-rendering/
+  // ────────────────────────────────────────────────────────────────────
+  "browser": {
+    "binding": "BROWSER"
+  },
+
+  // ────────────────────────────────────────────────────────────────────
+  // Durable Objects — required by McpAgent for stateful MCP sessions
+  // ────────────────────────────────────────────────────────────────────
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "MCP_OBJECT",
+        "class_name": "PingoDoceMCP"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["PingoDoceMCP"]
+    }
+  ],
+
+  // ────────────────────────────────────────────────────────────────────
+  // Cloudflare Access environment variables (set as secrets, not here)
+  //
+  // Cloudflare Access identifiers. These are not credentials; the Worker uses
+  // them to verify the Access JWT forwarded by Cloudflare Access.
+  // ────────────────────────────────────────────────────────────────────
+  "vars": {
+    "CF_ACCESS_AUD": "0d326472df54dae249ff2d26615d60c241442a670c98958d7fee94b1f58ed0f8",
+    "CF_ACCESS_TEAM_DOMAIN": "cf-rnobre.cloudflareaccess.com",
+    "CF_ACCESS_SKIP_AUTH": "false"
+  },
+
+  // ────────────────────────────────────────────────────────────────────
+  // Local dev overrides (wrangler dev only)
+  // Browser Rendering is NOT available in `wrangler dev` (local mode).
+  // Use `wrangler dev --remote` to use real Browser Rendering in dev.
+  // ────────────────────────────────────────────────────────────────────
+  "dev": {
+    "port": 8787
+  }
+}
