@@ -299,11 +299,16 @@ export async function withBrowser<T>(env: Env, fn: (page: Page) => Promise<T>): 
     page.setDefaultNavigationTimeout(NAV_TIMEOUT_MS);
     page.setDefaultTimeout(NAV_TIMEOUT_MS);
 
-    // Pages are server-rendered: skip heavy assets to cut latency.
+    // Pages are server-rendered: skip heavy assets to cut latency, and block
+    // Kevel retail-media calls (Kevel-GetProducts / Kevel-GetBanners), which
+    // inject sponsored, often non-promoted tiles into result grids.
     await page.setRequestInterception(true);
     page.on("request", (req) => {
       const type = req.resourceType();
-      if (type === "image" || type === "font" || type === "media" || type === "stylesheet") {
+      if (
+        type === "image" || type === "font" || type === "media" || type === "stylesheet" ||
+        req.url().includes("/Kevel-")
+      ) {
         void req.abort();
       } else {
         void req.continue();
