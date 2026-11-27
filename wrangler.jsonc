@@ -9,6 +9,11 @@
   "compatibility_date": "2025-09-22",
   "compatibility_flags": ["nodejs_compat"],
 
+  // Functions passed to puppeteer page.evaluate() are serialised and run in
+  // the browser. esbuild's keepNames injects `__name(...)` calls into them,
+  // which throw "ReferenceError: __name is not defined" in the page.
+  "keep_names": false,
+
   // ────────────────────────────────────────────────────────────────────
   // Browser Rendering binding
   // Requires a Workers Paid plan (included in Workers Paid / Bundled).

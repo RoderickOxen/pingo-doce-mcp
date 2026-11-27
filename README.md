@@ -15,17 +15,27 @@ A **remote MCP (Model Context Protocol) server** that uses Cloudflare Workers + 
 | `get_promotions` | Scrape current promotions / offers (optional category filter) |
 | `compare_prices` | Side-by-side comparison of multiple product searches |
 
-**Scraping strategy** (most-specific → least-specific):
-1. JSON-LD structured data (`application/ld+json`)
-2. CSS selector heuristics (common e-commerce patterns)
-3. Price-text regex fallback
+**Scraping strategy** — the site is Salesforce Commerce Cloud and server-rendered:
+- Listings (search / promotions / categories): `.product-tile-pd[data-pid]` tiles; prices
+  come from `.sales .value[content]` / `.strike-through .value[content]`, so we don't need to parse text.
+- Product pages: `.product-detail[data-pid]` for prices + JSON-LD for description/image
+  (the site's JSON-LD has no `offers`).
+
+| Tool | Source URL |
+|------|------------|
+| `search_products` | `/on/demandware.store/Sites-pingo-doce-Site/default/Search-Show?q=…&sz=N` |
+| `get_promotions` | `/home/produtos/promocoes`, `/home/produtos/promocoes/poupe-esta-semana`, or `/home/produtos/<category>` filtered to promoted items |
+| `get_product` | `/home/produtos/<category>/…/<name>-<id>.html` |
+
+> robots.txt disallows `/on/demandware.store/` and `?sz=`. Search depends on that endpoint, so keep usage personal and low-frequency.
 
 **Guardrails**:
 - Domain allowlist: only `pingodoce.pt` / `*.pingodoce.pt`
 - Max query length: 200 chars
 - Max results: 50 per call
 - Browser closed in `finally` on every request
-- Sequential execution for `compare_prices` (no parallel browser instances)
+- One browser per tool call; `compare_prices` reuses it for sequential searches
+- Images / fonts / CSS are blocked (pages are server-rendered)
 - Descriptive User-Agent string
 
 ---
@@ -225,17 +235,14 @@ For Claude Desktop (SSE transport):
 
 ## Selector Maintenance
 
-Because Pingo Doce's website HTML structure may change, the scraper uses
-**multiple fallback strategies**. After deployment, if tools return empty results:
+If tools start returning empty results or a "No products found" warning:
 
-1. Open `https://www.pingodoce.pt/produtos/?s=leite` in a real browser
-2. Inspect the product card elements (`F12` → pick element)
-3. Note the CSS class names or data-attributes on product cards
-4. Update `CARD_SELECTORS` in `src/scraper.ts` with the confirmed selectors
-5. Also update the `searchUrls` array if the search URL pattern differs
+1. Open `https://www.pingodoce.pt/on/demandware.store/Sites-pingo-doce-Site/default/Search-Show?q=leite` in a browser
+2. Inspect a product card (`F12`): it should be `.product-tile-pd[data-pid]`
+3. Update the selectors in `extractTilesInPage` / `extractProductPageInPage` in `src/scraper.ts`
 
-The JSON-LD strategy (`source: "json-ld"`) is the most reliable — check if
-the site embeds `<script type="application/ld+json">` tags with `@type: "Product"`.
+Note: `wrangler.jsonc` sets `keep_names: false`. It stops esbuild from injecting `__name()` into
+functions passed to `page.evaluate()`, which can throw `__name is not defined` in the browser.
 
 ---
 
@@ -260,7 +267,7 @@ pingo-doce-mcp/
 
 | Command | Description |
 |---------|-------------|
-| `npm run dev` | Local dev (no Browser Rendering) |
+| `npm run dev` | Local dev (local Browser Rendering via a local Chrome; put `CF_ACCESS_SKIP_AUTH=true` in `.dev.vars`) |
 | `npm run dev -- --remote` | Remote dev with Browser Rendering |
 | `npm run deploy` | Deploy to Cloudflare Workers |
 | `npm run typecheck` | TypeScript type check (no emit) |
@@ -269,8 +276,8 @@ pingo-doce-mcp/
 
 ## Limitations & known issues
 
-- **Browser Rendering is synchronous per call** — each tool invocation launches one browser. The `compare_prices` tool runs searches sequentially to avoid resource exhaustion.
-- **Selectors need live verification** — the CSS heuristics are best-effort. After first deployment, inspect the site and update `CARD_SELECTORS`.
+- **One browser per tool call** — Browser Rendering limits how many browsers you can launch per minute; `compare_prices` reuses a single session.
+- **Selectors are site-specific** — verified against the live site (Nov 2026); see *Selector Maintenance*.
+- **Weighted goods** (talho/peixaria) are priced per kg — `price` then reads e.g. `6,19 €/Kg`.
 - **Durable Objects bill separately** — check [Cloudflare pricing](https://developers.cloudflare.com/durable-objects/platform/pricing/).
-- **`wrangler dev` (local)** does not support Browser Rendering. Use `--remote`.
 - **Rate limiting** — be conservative with usage. The site may return CAPTCHAs or block IPs under high load.

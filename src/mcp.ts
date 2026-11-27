@@ -11,8 +11,10 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import type { Env } from "./types.ts";
+import type { ProductResult } from "./types.ts";
 import {
-  scrapeSearch,
+  withBrowser,
+  searchProducts,
   scrapeProductPage,
   scrapePromotions,
   sanitizeQuery,
@@ -21,6 +23,8 @@ import {
   MAX_QUERY_LENGTH,
   MAX_LIMIT,
   DEFAULT_LIMIT,
+  CATEGORY_SLUGS,
+  PROMO_LISTS,
 } from "./scraper.ts";
 
 // ────────────────────────────────────────────────────────────────────
@@ -51,10 +55,9 @@ export class PingoDoceMCP extends McpAgent<Env> {
       "search_products",
       `Search Pingo Doce's online store for products matching a query.
 Returns up to \`limit\` products (default ${DEFAULT_LIMIT}, max ${MAX_LIMIT}).
-Each product includes name, price, unit price, promotion label, URL, and image.
-
-NOTE: Pingo Doce's website selectors are subject to change. If results are
-empty, the search URL pattern may need updating — see scraper.ts.`,
+Each product includes id, name, brand, size, price (and numeric priceValue),
+originalPrice when reduced, unitPrice, promotion info, category, URL and image.
+Online-purchasable products are preferred; falls back to the full catalogue.`,
       {
         query: z
           .string()
@@ -81,10 +84,13 @@ empty, the search URL pattern may need updating — see scraper.ts.`,
         try {
           const n = clampLimit(limit, DEFAULT_LIMIT);
           const q = sanitizeQuery(query);
-          const { products, warning } = await scrapeSearch(env, q, n);
+          const { products, sourceUrl, warning } = await withBrowser(env, (page) =>
+            searchProducts(page, q, n)
+          );
 
           const payload = {
             query: q,
+            sourceUrl,
             limit: n,
             count: products.length,
             products,
@@ -121,13 +127,14 @@ empty, the search URL pattern may need updating — see scraper.ts.`,
       "get_product",
       `Fetch detailed information for a specific Pingo Doce product by its URL.
 Only accepts URLs on the pingodoce.pt domain.
-Returns name, price, unit price, promotion, image, and raw visible text.`,
+Use URLs returned by search_products / get_promotions.
+Returns name, brand, size, price, originalPrice, unitPrice, promotion, category, description and image.`,
       {
         url: z
           .string()
           .url()
           .describe(
-            `Full URL of the product page, e.g. "https://www.pingodoce.pt/produtos/leite-mimosa-magro/".`
+            `Full URL of the product page, e.g. "https://www.pingodoce.pt/home/produtos/leite-e-bebidas-vegetais/leite/leite-meio-gordo-e-gordo/leite-uht-meio-gordo-mimosa-41043.html".`
           ),
       },
       {
@@ -141,13 +148,14 @@ Returns name, price, unit price, promotion, image, and raw visible text.`,
           // Domain validation — throws for non-pingodoce.pt URLs
           validatePingoDoceUrl(url);
 
-          const { product, warning } = await scrapeProductPage(env, url);
+          const { product } = await withBrowser(env, (page) =>
+            scrapeProductPage(page, url)
+          );
 
           const payload = {
             requestedUrl: url,
             product,
             scrapedAt: new Date().toISOString(),
-            ...(warning ? { warning } : {}),
           };
 
           return {
@@ -177,18 +185,19 @@ Returns name, price, unit price, promotion, image, and raw visible text.`,
     // ── Tool 3: get_promotions ─────────────────────────────────────
     this.server.tool(
       "get_promotions",
-      `Scrape current promotions from Pingo Doce's promotions/offers pages.
-Optionally filter by category (e.g. "lacticinios", "frutas-e-legumes").
-Returns up to \`limit\` promoted products.
-
-NOTE: The promotions URL pattern may need live verification — see scraper.ts.`,
+      `Current Pingo Doce promotions (from /home/produtos/promocoes).
+Optional \`category\`:
+  - a promotion list: ${PROMO_LISTS.join(", ")}
+  - or a product category slug, returning only promoted items in it:
+    ${CATEGORY_SLUGS.join(", ")}
+Returns up to \`limit\` promoted products.`,
       {
         category: z
           .string()
           .max(100)
           .optional()
           .describe(
-            `Optional category slug to filter promotions, e.g. "lacticinios" or "bebidas".`
+            `Optional promotion list or category slug, e.g. "poupe-esta-semana" or "leite-e-bebidas-vegetais".`
           ),
         limit: z
           .number()
@@ -207,14 +216,13 @@ NOTE: The promotions URL pattern may need live verification — see scraper.ts.`
       async ({ category, limit }) => {
         try {
           const n = clampLimit(limit, DEFAULT_LIMIT);
-          const { products, warning } = await scrapePromotions(
-            env,
-            category,
-            n
+          const { products, sourceUrl, warning } = await withBrowser(env, (page) =>
+            scrapePromotions(page, category, n)
           );
 
           const payload = {
             category: category ?? null,
+            sourceUrl,
             limit: n,
             count: products.length,
             products,
@@ -250,8 +258,9 @@ NOTE: The promotions URL pattern may need live verification — see scraper.ts.`
     this.server.tool(
       "compare_prices",
       `Compare search results for multiple product names side-by-side.
-Searches each product name sequentially (conservative — no parallel browsing)
-and returns grouped results for price comparison.
+Searches each product name sequentially in a single browser session and
+returns grouped results plus the cheapest match per name (by shelf price, among results whose
+name/brand contains every query word; null if none match).
 
 Limits: max 5 product names per call, max ${MAX_LIMIT} results per product.`,
       {
@@ -281,31 +290,42 @@ Limits: max 5 product names per call, max ${MAX_LIMIT} results per product.`,
       async ({ product_names, limit_per_product }) => {
         try {
           const n = clampLimit(limit_per_product, DEFAULT_LIMIT);
-          const results: Record<
-            string,
-            Array<{
-              name: string | null;
-              price: string | null;
-              unitPrice: string | null;
-              promotion: string | null;
-              url: string | null;
-              image: string | null;
-              rawText: string | null;
-              source: string;
-            }>
-          > = {};
+          const results: Record<string, ProductResult[]> = {};
+          const cheapest: Record<string, ProductResult | null> = {};
+          const warnings: Record<string, string> = {};
 
-          // Sequential execution — do NOT parallelise browser launches
-          for (const productName of product_names) {
-            const q = sanitizeQuery(productName);
-            const { products } = await scrapeSearch(env, q, n);
-            results[productName] = products;
-          }
+          // One browser, sequential navigations — never parallelise.
+          await withBrowser(env, async (page) => {
+            for (const productName of product_names) {
+              const { products, warning } = await searchProducts(
+                page,
+                sanitizeQuery(productName),
+                n
+              );
+              results[productName] = products;
+              // Site search is fuzzy ("manteiga" also returns biscuits), so only
+              // rank products whose name/brand contains every query word.
+              const fold = (t: string) =>
+                t.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+              const words = fold(productName).split(/\s+/).filter((w) => w.length > 1);
+              cheapest[productName] =
+                products
+                  .filter((p) => p.priceValue != null)
+                  .filter((p) => {
+                    const hay = fold(`${p.name ?? ""} ${p.brand ?? ""}`);
+                    return words.every((w) => hay.includes(w));
+                  })
+                  .sort((a, b) => (a.priceValue ?? 0) - (b.priceValue ?? 0))[0] ?? null;
+              if (warning) warnings[productName] = warning;
+            }
+          });
 
           const payload = {
             productNames: product_names,
             limitPerProduct: n,
+            cheapest,
             results,
+            ...(Object.keys(warnings).length > 0 ? { warnings } : {}),
             scrapedAt: new Date().toISOString(),
           };
 

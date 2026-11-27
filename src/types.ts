@@ -48,21 +48,35 @@ export interface Env {
  * A single product scraped from Pingo Doce.
  */
 export interface ProductResult {
+  /** Pingo Doce product id (SFCC pid), e.g. "41043" */
+  id: string | null;
   /** Product display name as shown on the page */
   name: string | null;
-  /** Formatted price string, e.g. "2,99€" */
+  /** Brand, e.g. "Mimosa" */
+  brand: string | null;
+  /** Pack size, e.g. "1 L" or "6 x 1 L" */
+  size: string | null;
+  /** Current (sale) price, formatted, e.g. "0,89 €" */
   price: string | null;
-  /** Unit price, e.g. "1,50€/kg" (null if not found) */
+  /** Current price as a number in EUR, e.g. 0.89 */
+  priceValue: number | null;
+  /** Price before discount, formatted (null when not reduced) */
+  originalPrice: string | null;
+  /** Unit price as shown, e.g. "0,89 €/L" */
   unitPrice: string | null;
-  /** Promotion or discount label, if visible */
+  /** True when a reduction / promo label / promo message is shown */
+  onPromotion: boolean;
+  /** Promotion label + validity, e.g. "Poupe mais de 10% | Promoção até 30/11" */
   promotion: string | null;
+  /** Category name, e.g. "Leite e Bebidas Vegetais" */
+  category: string | null;
+  /** Product description (product pages only) */
+  description?: string | null;
   /** Absolute URL to the product page */
   url: string | null;
-  /** URL to the product image (null if placeholder/data-URI) */
+  /** URL to the product image */
   image: string | null;
-  /** First 500 chars of visible text for debugging (null on detail pages) */
-  rawText: string | null;
-  /** Extraction strategy: "json-ld" | "heuristic" | "detail-page" */
+  /** Extraction strategy: "product-tile" | "product-page" */
   source: string;
 }
 

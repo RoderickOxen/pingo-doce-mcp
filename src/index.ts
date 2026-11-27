@@ -22,6 +22,9 @@ import { PingoDoceMCP } from "./mcp.ts";
 // The class_name in wrangler.jsonc must match this export name exactly.
 export { PingoDoceMCP };
 
+// Build the MCP handler once per isolate rather than on every request.
+const mcpHandler = PingoDoceMCP.serve("/mcp", { binding: "MCP_OBJECT" });
+
 // ────────────────────────────────────────────────────────────────────
 // Cloudflare Access JWT validation
 // ────────────────────────────────────────────────────────────────────
@@ -82,18 +85,36 @@ async function validateAccessJwt(
       return { valid: false, reason: "Malformed JWT: expected 3 parts." };
     }
 
-    // Decode payload (base64url)
-    const payloadJson = atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"));
-    const payload = JSON.parse(payloadJson) as {
-      aud?: string | string[];
-      exp?: number;
-      kid?: string;
+    const b64urlDecode = (s: string): string => {
+      const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+      return atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
     };
 
-    // Check expiry
+    // Decode header + payload (base64url)
+    const header = JSON.parse(b64urlDecode(parts[0])) as { kid?: string; alg?: string };
+    const payload = JSON.parse(b64urlDecode(parts[1])) as {
+      aud?: string | string[];
+      exp?: number;
+      nbf?: number;
+      iss?: string;
+    };
+
+    if (header.alg !== "RS256") {
+      return { valid: false, reason: `Unexpected JWT alg "${header.alg}".` };
+    }
+
+    // Check expiry / not-before (exp is mandatory for Access tokens)
     const now = Math.floor(Date.now() / 1000);
-    if (payload.exp !== undefined && payload.exp < now) {
-      return { valid: false, reason: "JWT has expired." };
+    if (typeof payload.exp !== "number" || payload.exp < now) {
+      return { valid: false, reason: "JWT has expired or has no exp claim." };
+    }
+    if (typeof payload.nbf === "number" && payload.nbf > now + 60) {
+      return { valid: false, reason: "JWT not yet valid." };
+    }
+
+    // Check issuer
+    if (payload.iss !== `https://${env.CF_ACCESS_TEAM_DOMAIN}`) {
+      return { valid: false, reason: "JWT issuer mismatch." };
     }
 
     // Check audience
@@ -119,12 +140,8 @@ async function validateAccessJwt(
       keys: Array<{ kid: string; n: string; e: string; kty: string; alg: string }>;
     };
 
-    // Decode JWT header to get `kid`
-    const headerJson = atob(parts[0].replace(/-/g, "+").replace(/_/g, "/"));
-    const header = JSON.parse(headerJson) as { kid?: string; alg?: string };
-
-    // Find the matching public key
-    const jwk = jwks.keys.find((k) => k.kid === header.kid) ?? jwks.keys[0];
+    // Find the matching public key (exact kid match only)
+    const jwk = jwks.keys.find((k) => k.kid === header.kid);
     if (!jwk) {
       return { valid: false, reason: "No matching JWK found." };
     }
@@ -138,10 +155,7 @@ async function validateAccessJwt(
       ["verify"]
     );
 
-    const signatureBytes = Uint8Array.from(
-      atob(parts[2].replace(/-/g, "+").replace(/_/g, "/")),
-      (c) => c.charCodeAt(0)
-    );
+    const signatureBytes = Uint8Array.from(b64urlDecode(parts[2]), (c) => c.charCodeAt(0));
     const dataBytes = new TextEncoder().encode(`${parts[0]}.${parts[1]}`);
 
     const isValid = await crypto.subtle.verify(
@@ -246,11 +260,7 @@ export default {
       }
 
       // Delegate to McpAgent — handles SSE, Streamable HTTP, and DO routing
-      return PingoDoceMCP.serve("/mcp", { binding: "MCP_OBJECT" }).fetch(
-        request,
-        env,
-        ctx
-      );
+      return mcpHandler.fetch(request, env, ctx);
     }
 
     // ── / — Info page ──────────────────────────────────────────────
